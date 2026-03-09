@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Soteria Mermaid Preview</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f7f8fa;
+      color: #1f2937;
+      height: 100vh;
+      box-sizing: border-box;
+    }
+    .toolbar {
+      margin-bottom: 8px;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .wrap {
+      width: 100%;
+      height: calc(100vh - 58px);
+      margin: 0;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 8px;
+      overflow: auto;
+      box-sizing: border-box;
+    }
+    #diagram {
+      transform-origin: top left;
+    }
+    .error {
+      color: #b91c1c;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    Mermaid preview source: <code>outputs/soteria_network_diagram.mmd</code>
+    <button id="fitWidth" type="button">Fit Width</button>
+    <button id="fitHeight" type="button">Fit Height</button>
+    <label for="zoom">Zoom:</label>
+    <input id="zoom" type="range" min="30" max="140" value="75" step="5">
+    <span id="zoomValue">75%</span>
+  </div>
+  <div class="wrap">
+    <div id="diagram">Loading diagram...</div>
+  </div>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "loose",
+      theme: "default",
+      flowchart: { useMaxWidth: true, htmlLabels: true }
+    });
+
+    async function loadMermaid() {
+      const container = document.getElementById("diagram");
+      const wrap = document.querySelector(".wrap");
+      const zoomInput = document.getElementById("zoom");
+      const zoomValue = document.getElementById("zoomValue");
+      const fitWidthBtn = document.getElementById("fitWidth");
+      const fitHeightBtn = document.getElementById("fitHeight");
+
+      function setZoomPercent(percent) {
+        const bounded = Math.max(30, Math.min(140, Math.round(percent / 5) * 5));
+        zoomInput.value = String(bounded);
+        applyZoom();
+      }
+
+      function applyZoom() {
+        const value = Number(zoomInput.value) / 100;
+        container.style.transform = `scale(${value})`;
+        zoomValue.textContent = `${zoomInput.value}%`;
+      }
+
+      zoomInput.addEventListener("input", applyZoom);
+
+      try {
+        const response = await fetch("./soteria_network_diagram.mmd", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Failed to load .mmd file: ${response.status} ${response.statusText}`);
+        }
+
+        const source = await response.text();
+        const { svg } = await mermaid.render("soteria-diagram", source);
+        container.innerHTML = svg;
+
+        const svgEl = container.querySelector("svg");
+
+        fitWidthBtn.addEventListener("click", () => {
+          if (!svgEl) return;
+          const targetWidth = wrap.clientWidth - 24;
+          const svgWidth = svgEl.viewBox.baseVal && svgEl.viewBox.baseVal.width
+            ? svgEl.viewBox.baseVal.width
+            : svgEl.getBBox().width;
+          if (!svgWidth) return;
+          setZoomPercent((targetWidth / svgWidth) * 100);
+        });
+
+        fitHeightBtn.addEventListener("click", () => {
+          if (!svgEl) return;
+          const targetHeight = wrap.clientHeight - 24;
+          const svgHeight = svgEl.viewBox.baseVal && svgEl.viewBox.baseVal.height
+            ? svgEl.viewBox.baseVal.height
+            : svgEl.getBBox().height;
+          if (!svgHeight) return;
+          setZoomPercent((targetHeight / svgHeight) * 100);
+        });
+
+        applyZoom();
+      } catch (err) {
+        container.className = "error";
+        container.textContent = String(err);
+      }
+    }
+
+    loadMermaid();
+  </script>
+</body>
+</html>

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -335,6 +336,74 @@ def build_diagram(
     return diagram_path
 
 
+def _mermaid_id(name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_]", "_", name)
+    if not safe:
+        safe = "node"
+    if safe[0].isdigit():
+        safe = f"n_{safe}"
+    return safe
+
+
+def _mermaid_text(value: str) -> str:
+    return (value or "").replace('"', "'").replace("|", "/")
+
+
+def write_mermaid_diagram(
+    output_dir: Path,
+    connections: List[Connection],
+    device_os: Dict[str, str],
+    device_ip: Dict[str, str],
+    device_mac: Dict[str, str],
+) -> Path:
+    """Write a Mermaid flowchart file that can be rendered in browser or markdown viewers."""
+    mermaid_path = output_dir / "soteria_network_diagram.mmd"
+
+    all_devices = sorted(device_os.keys())
+    device_group_counter: Dict[str, Counter] = defaultdict(Counter)
+    for connection in connections:
+        device_group_counter[connection.from_device][connection.boundary_group] += 1
+        device_group_counter[connection.to_device][connection.boundary_group] += 1
+
+    unique_group_devices: Dict[str, List[str]] = defaultdict(list)
+    for device in all_devices:
+        group = primary_boundary(device_group_counter.get(device, Counter()))
+        unique_group_devices[group].append(device)
+
+    lines: List[str] = [
+        "flowchart LR",
+        "  %% Auto-generated Mermaid network diagram",
+    ]
+
+    for group_name in sorted(unique_group_devices.keys()):
+        group_id = _mermaid_id(group_name)
+        lines.append(f"  subgraph {group_id}[\"Subnet/VLAN: {_mermaid_text(group_name)}\"]")
+        for device in sorted(set(unique_group_devices[group_name])):
+            node_id = _mermaid_id(device)
+            label = (
+                f"Server: {_mermaid_text(device)}<br/>"
+                f"IP: {_mermaid_text(device_ip.get(device, 'Unknown'))}<br/>"
+                f"MAC: {_mermaid_text(device_mac.get(device, 'Unknown'))}"
+            )
+            lines.append(f"    {node_id}[\"{label}\"]")
+        lines.append("  end")
+
+    seen_edges = set()
+    for connection in connections:
+        src = _mermaid_id(connection.from_device)
+        dst = _mermaid_id(connection.to_device)
+        port_text = str(connection.low_port) if connection.low_port is not None else "N/A"
+        edge_label = _mermaid_text(f"{port_text}/{connection.protocol} {connection.service}")
+        edge_key = (src, dst, edge_label)
+        if edge_key in seen_edges:
+            continue
+        seen_edges.add(edge_key)
+        lines.append(f"  {src} -->|\"{edge_label}\"| {dst}")
+
+    mermaid_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return mermaid_path
+
+
 def write_summary_tables(
     output_dir: Path,
     connections: List[Connection],
@@ -608,6 +677,8 @@ def main() -> None:
 
     high_risk_csv, full_csv = write_summary_tables(output_dir, connections, device_ip, device_mac)
 
+    mermaid_path = write_mermaid_diagram(output_dir, connections, device_os, device_ip, device_mac)
+
     pdf_path = output_dir / "soteria_network_security_report.pdf"
     build_pdf_report(pdf_path, diagram_path, connections, device_os, device_ip, device_mac, parsed_at)
 
@@ -615,6 +686,7 @@ def main() -> None:
     print(f"- Diagram PNG: {diagram_path}")
     print(f"- High-risk summary CSV: {high_risk_csv}")
     print(f"- Full connection summary CSV: {full_csv}")
+    print(f"- Mermaid diagram (.mmd): {mermaid_path}")
     print(f"- PDF report: {pdf_path}")
 
 

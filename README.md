@@ -2,6 +2,12 @@
 
 Using data collected from OpenRMF Professional (www.soteriasoft.com) we will use python to generate network diagrams as well as information for all of the devices, boundaries, and PPS for them to work on autogenerating a network diagram.
 
+* Reads in a CSV formatted for this python script
+* generates a connection CSV
+* generates a high risk CSV
+* generates a PNG (still a work in progress)
+* generates a PDF with summary data
+* generates a `mermaid.js` type file for rendering
 
 ## MacOS Sonoma
 
