@@ -1,3 +1,5 @@
+# The questions we fed Gemini
+
 is there a way to feed a python program information in a CSV on devices, ip address, operating system mac, connections to other devices over port, protocol, and service and make it generate a network diagram PNG file?
 
 
@@ -194,7 +196,7 @@ Would you like me to show you how to add "Subnets" or "VLAN" groupings so that d
 
 ------
 
-o switch to the Diagrams library, the logic remains the same (looping through a CSV), but the output will look much more like a professional network map with actual icons for Windows, Linux, and Routers.
+To switch to the Diagrams library, the logic remains the same (looping through a CSV), but the output will look much more like a professional network map with actual icons for Windows, Linux, and Routers.
 
 1. Prerequisites (Free Setup)
 You still need the Graphviz engine installed on your OS (as it handles the positioning of the icons), but you will need to install the specific Python library:
