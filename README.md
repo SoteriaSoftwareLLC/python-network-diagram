@@ -8,6 +8,7 @@ Using data collected from OpenRMF Professional (www.soteriasoft.com) we will use
 * generates a PNG (still a work in progress)
 * generates a PDF with summary data
 * generates a `mermaid.js` type file for rendering
+* generates an open-source Microsoft Visio `.vsdx` file
 
 ## MacOS Sonoma
 
@@ -18,6 +19,7 @@ python3 -m venv path/to/venv
 source path/to/venv/bin/activate
 python3 -m pip install graphviz
 python3 -m pip install diagrams
+python3 -m pip install vsdx
 ```
 
 # How to Run this
@@ -28,11 +30,35 @@ Completed network audit artifact generation:
 - Diagram PNG: ./soteria/OpenRMFPro/python-network-diagram/outputs/soteria_network_diagram.png
 - High-risk summary CSV: ./soteria/OpenRMFPro/python-network-diagram/outputs/high_risk_summary.csv
 - Full connection summary CSV: ./soteria/OpenRMFPro/python-network-diagram/outputs/all_connections_summary.csv
+- Microsoft Visio diagram (.vsdx): ./soteria/OpenRMFPro/python-network-diagram/outputs/soteria_network_diagram.vsdx
 - PDF report: ./soteria/OpenRMFPro/python-network-diagram/outputs/soteria_network_security_report.pdf
 ```
 
+Optional diagram format control:
 
-# GitHub Copilot Prompt once we had the XLSX and CSV file
+```bash
+# Generate Mermaid and Visio (default)
+.venv/bin/python network_security_diagram_report.py --diagram-outputs both
+
+# Generate Mermaid only
+.venv/bin/python network_security_diagram_report.py --diagram-outputs mermaid-only
+
+# Generate Visio only
+.venv/bin/python network_security_diagram_report.py --diagram-outputs visio-only
+
+# Generate MyDraw-compatible ultra-safe Visio only
+.venv/bin/python network_security_diagram_report.py --diagram-outputs mydraw
+```
+
+MyDraw compatibility note:
+
+```bash
+# This output is generated when using --diagram-outputs mydraw
+outputs/soteria_network_diagram_mydraw_ultra_safe.vsdx
+```
+
+
+# GitHub Copilot Prompt to start this process once we had the XLSX and CSV file
 
 ```
 given the datafiles/soteria-infra-PPSM.csv file perform the following

@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import csv
+import argparse
 import re
 import subprocess
+import shutil
+import zipfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +18,13 @@ from typing import Dict, List, Optional, Tuple
 from diagrams import Cluster, Diagram, Edge
 from diagrams.generic.compute import Rack
 from fpdf import FPDF
+
+try:
+    import vsdx
+    from vsdx import Media
+except ImportError:
+    vsdx = None
+    Media = None
 
 # Known high-risk ports. Matching ports are always treated as HIGH severity.
 DANGER_PORTS: Dict[int, str] = {
@@ -404,6 +414,221 @@ def write_mermaid_diagram(
     return mermaid_path
 
 
+def write_visio_diagram(
+    output_dir: Path,
+    connections: List[Connection],
+    device_os: Dict[str, str],
+    device_ip: Dict[str, str],
+    device_mac: Dict[str, str],
+    *,
+    include_edges: bool = True,
+    output_filename: str = "soteria_network_diagram.vsdx",
+    remove_seed_shapes: bool = True,
+) -> Path:
+    """Write an open-source .vsdx network diagram using the vsdx package."""
+    if vsdx is None:
+        raise RuntimeError(
+            "Missing optional dependency 'vsdx'. Install it with: pip install vsdx"
+        )
+
+    visio_path = output_dir / output_filename
+    media_path = Path(vsdx.__file__).resolve().parent / "media" / "media.vsdx"
+    shutil.copyfile(media_path, visio_path)
+
+    all_devices = sorted(device_os.keys())
+    device_group_counter: Dict[str, Counter] = defaultdict(Counter)
+    for connection in connections:
+        device_group_counter[connection.from_device][connection.boundary_group] += 1
+        device_group_counter[connection.to_device][connection.boundary_group] += 1
+
+    grouped_devices: Dict[str, List[str]] = defaultdict(list)
+    for device in all_devices:
+        group = primary_boundary(device_group_counter.get(device, Counter()))
+        grouped_devices[group].append(device)
+
+    # Visio coordinates are in inches from page origin.
+    left_margin = 1.6
+    top_y = 9.6
+    group_x_gap = 3.8
+    row_y_gap = 1.45
+    node_w = 2.7
+    node_h = 1.05
+    header_h = 0.55
+
+    with vsdx.VisioFile(str(visio_path)) as vis:
+        page = vis.pages[0]
+        page.name = "Network Diagram"
+
+        # Clone only from template shapes that already exist in this page.
+        rect_master = page.find_shape_by_text("RECTANGLE")
+        line_master = page.find_shape_by_text("LINE")
+        if rect_master is None or line_master is None:
+            raise RuntimeError("Template shapes RECTANGLE/LINE not found in base VSDX page.")
+
+        device_shapes = {}
+
+        for group_index, group_name in enumerate(sorted(grouped_devices.keys())):
+            group_x = left_margin + (group_index * group_x_gap)
+
+            header = rect_master.copy(page)
+            header.width = node_w
+            header.height = header_h
+            header.x = group_x
+            header.y = top_y + 0.8
+            header.text = f"Subnet/VLAN: {group_name}"
+
+            for row_index, device in enumerate(sorted(set(grouped_devices[group_name]))):
+                node = rect_master.copy(page)
+                node.width = node_w
+                node.height = node_h
+                node.x = group_x
+                node.y = top_y - (row_index * row_y_gap)
+                node.text = (
+                    f"{device}\n"
+                    f"IP: {device_ip.get(device, 'Unknown')}\n"
+                    f"MAC: {device_mac.get(device, 'Unknown')}\n"
+                    f"OS: {device_os.get(device, 'Unknown OS')}"
+                )
+                device_shapes[device] = node
+
+        if include_edges:
+            seen_edges = set()
+            for connection in connections:
+                src = device_shapes.get(connection.from_device)
+                dst = device_shapes.get(connection.to_device)
+                if not src or not dst:
+                    continue
+
+                port_text = str(connection.low_port) if connection.low_port is not None else "N/A"
+                edge_label = f"{port_text}/{connection.protocol} {connection.service}"
+                edge_key = (connection.from_device, connection.to_device, edge_label)
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
+
+                edge = line_master.copy(page)
+                src_x, src_y = src.center_x_y
+                dst_x, dst_y = dst.center_x_y
+                edge.begin_x = src_x
+                edge.begin_y = src_y
+                edge.end_x = dst_x
+                edge.end_y = dst_y
+                edge.x = src_x
+                edge.y = src_y
+                edge.width = dst_x - src_x
+                edge.height = dst_y - src_y
+                edge.text = edge_label
+
+                # Best-effort edge severity styling. Keep diagram generation resilient.
+                try:
+                    if connection.severity == "HIGH":
+                        edge.set_cell_formula("LineColor", "RGB(255,0,0)")
+                        edge.set_cell_value("LineWeight", "0.035 in")
+                    elif connection.severity == "MEDIUM":
+                        edge.set_cell_formula("LineColor", "RGB(255,140,0)")
+                        edge.set_cell_value("LineWeight", "0.02 in")
+                    else:
+                        edge.set_cell_formula("LineColor", "RGB(65,105,225)")
+                        edge.set_cell_value("LineWeight", "0.014 in")
+                except Exception:
+                    pass
+
+        # Optionally remove original seed/template shapes from the base media file.
+        if remove_seed_shapes:
+            for seed_text in ["RECTANGLE", "CONNECTED_SHAPE", "STRAIGHT_CONNECTOR", "CURVED_CONNECTOR", "CIRCLE", "LINE"]:
+                seed = page.find_shape_by_text(seed_text)
+                if seed is not None:
+                    seed.remove()
+
+        # Drop stale Connect rows that still reference deleted shapes.
+        ns = "{http://schemas.microsoft.com/office/visio/2012/main}"
+        shape_ids = {
+            s.attrib.get("ID")
+            for s in page.xml.findall(f".//{ns}Shape")
+            if s.attrib.get("ID")
+        }
+        connects_parent = page.xml.find(f".//{ns}Connects")
+        if connects_parent is not None:
+            for connect in list(connects_parent.findall(f"{ns}Connect")):
+                from_id = connect.attrib.get("FromSheet")
+                to_id = connect.attrib.get("ToSheet")
+                if from_id not in shape_ids or to_id not in shape_ids:
+                    connects_parent.remove(connect)
+
+            # If all connects were removed, drop the empty container as well.
+            if not list(connects_parent):
+                root = page.xml.getroot()
+                root.remove(connects_parent)
+
+        vis.save_vsdx(str(visio_path))
+
+    return visio_path
+
+
+def write_visio_mydraw_ultra_safe(
+    output_dir: Path,
+    connections: List[Connection],
+    device_os: Dict[str, str],
+    device_ip: Dict[str, str],
+    device_mac: Dict[str, str],
+) -> Path:
+    """Write a minimal-risk VSDX by raw editing smoke-template text only.
+
+    This intentionally avoids the vsdx serializer because MyDraw is strict about
+    the original XML namespace/prefix formatting of the template file.
+    """
+    if vsdx is None:
+        raise RuntimeError(
+            "Missing optional dependency 'vsdx'. Install it with: pip install vsdx"
+        )
+
+    visio_path = output_dir / "soteria_network_diagram_mydraw_ultra_safe.vsdx"
+    media_path = Path(vsdx.__file__).resolve().parent / "media" / "media.vsdx"
+    tmp_path = output_dir / "soteria_network_diagram_mydraw_ultra_safe.tmp.vsdx"
+
+    devices = sorted(device_os.keys())
+    device_lines = [
+        f"{d} | {device_ip.get(d, 'Unknown')} | {device_mac.get(d, 'Unknown')} | {device_os.get(d, 'Unknown OS')}"
+        for d in devices[:8]
+    ]
+    conn_lines = [
+        f"{c.from_device}->{c.to_device} {c.low_port if c.low_port is not None else 'N/A'}/{c.protocol} {c.service} [{c.severity}]"
+        for c in connections[:12]
+    ]
+
+    # Escape XML content but preserve line breaks for readability.
+    def xml_escape(value: str) -> str:
+        return (
+            (value or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    replacements = {
+        "RECTANGLE\n": "Devices\n" + "\n".join(device_lines),
+        "CONNECTED_SHAPE\n": "Connections\n" + "\n".join(conn_lines),
+        "CIRCLE\n": f"Totals\nDevices: {len(devices)}\nConnections: {len(connections)}",
+        "LINE\n": "Generated by python-network-diagram",
+    }
+
+    with zipfile.ZipFile(media_path, "r") as zin, zipfile.ZipFile(tmp_path, "w") as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "visio/pages/page1.xml":
+                text = data.decode("utf-8")
+                for old_text, new_text in replacements.items():
+                    old_fragment = f">{xml_escape(old_text)}<"
+                    new_fragment = f">{xml_escape(new_text)}<"
+                    text = text.replace(old_fragment, new_fragment, 1)
+                data = text.encode("utf-8")
+            zout.writestr(info, data)
+
+    tmp_path.replace(visio_path)
+
+    return visio_path
+
+
 def write_summary_tables(
     output_dir: Path,
     connections: List[Connection],
@@ -661,7 +886,26 @@ def configure_pdf_fonts(pdf: FPDF) -> None:
         pdf.add_font("Arial", style="B", fname=str(bold))
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate network audit artifacts from PPSM CSV input."
+    )
+    parser.add_argument(
+        "--diagram-outputs",
+        choices=["mermaid-only", "visio-only", "both", "mydraw"],
+        default="both",
+        help=(
+            "Select generated text-diagram formats. "
+            "mermaid-only=write .mmd only, visio-only=write standard .vsdx only, "
+            "both=write Mermaid + standard .vsdx, mydraw=write MyDraw ultra-safe .vsdx only."
+        ),
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+
     root = Path(__file__).resolve().parent
     csv_path = root / "datafiles" / "soteria-infra-PPSM.csv"
     output_dir = root / "outputs"
@@ -677,7 +921,32 @@ def main() -> None:
 
     high_risk_csv, full_csv = write_summary_tables(output_dir, connections, device_ip, device_mac)
 
-    mermaid_path = write_mermaid_diagram(output_dir, connections, device_os, device_ip, device_mac)
+    mermaid_path = None
+    visio_path = None
+    visio_ultra_safe_path = None
+
+    if args.diagram_outputs in {"mermaid-only", "both"}:
+        mermaid_path = write_mermaid_diagram(output_dir, connections, device_os, device_ip, device_mac)
+
+    if args.diagram_outputs in {"visio-only", "both"}:
+        visio_path = write_visio_diagram(
+            output_dir,
+            connections,
+            device_os,
+            device_ip,
+            device_mac,
+            include_edges=True,
+            output_filename="soteria_network_diagram.vsdx",
+        )
+
+    if args.diagram_outputs == "mydraw":
+        visio_ultra_safe_path = write_visio_mydraw_ultra_safe(
+            output_dir,
+            connections,
+            device_os,
+            device_ip,
+            device_mac,
+        )
 
     pdf_path = output_dir / "soteria_network_security_report.pdf"
     build_pdf_report(pdf_path, diagram_path, connections, device_os, device_ip, device_mac, parsed_at)
@@ -686,7 +955,12 @@ def main() -> None:
     print(f"- Diagram PNG: {diagram_path}")
     print(f"- High-risk summary CSV: {high_risk_csv}")
     print(f"- Full connection summary CSV: {full_csv}")
-    print(f"- Mermaid diagram (.mmd): {mermaid_path}")
+    if mermaid_path:
+        print(f"- Mermaid diagram (.mmd): {mermaid_path}")
+    if visio_path:
+        print(f"- Microsoft Visio diagram (.vsdx): {visio_path}")
+    if visio_ultra_safe_path:
+        print(f"- Microsoft Visio diagram (.vsdx, MyDraw ultra-safe mode): {visio_ultra_safe_path}")
     print(f"- PDF report: {pdf_path}")
 
 
